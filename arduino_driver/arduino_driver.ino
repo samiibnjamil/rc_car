@@ -2,6 +2,8 @@
 #include <IRremote.h>
 #include <QMC5883LCompass.h>
 
+#this is a test
+
 double error ;
 int RECV_PIN = A3;
 uint8_t speed1;
