@@ -1,255 +1,157 @@
+#include <Arduino.h>
 #include <Bluepad32.h>
 #include <Wire.h>
 #include <Adafruit_MotorShield.h>
 
-int speed = 0;
-int turn = 0;
-
-
+// Motor definitions
 Adafruit_MotorShield AFMS = Adafruit_MotorShield();
 Adafruit_DCMotor *frontRightMotor = AFMS.getMotor(1);
 Adafruit_DCMotor *frontLeftMotor = AFMS.getMotor(2);
 Adafruit_DCMotor *backRightMotor = AFMS.getMotor(3);
 Adafruit_DCMotor *backLeftMotor = AFMS.getMotor(4);
 
+// Gamepad variables
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+int leftSpeed, rightSpeed;
+int speedIndex = 0;
+int maxSpeed = 160;
 
-// This callback gets called any time a new gamepad is connected.
-// Up to 4 gamepads can be connected at the same time.
+// Semaphore for synchronization
+SemaphoreHandle_t controllerSemaphore;
+
+// Callback for connected controllers
 void onConnectedController(ControllerPtr ctl) {
-  bool foundEmptySlot = false;
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (myControllers[i] == nullptr) {
-      Serial.printf("CALLBACK: Controller is connected, index=%d\n", i);
-      // Additionally, you can get certain gamepad properties like:
-      // Model, VID, PID, BTAddr, flags, etc.
+      Serial.printf("CALLBACK: Controller connected, index=%d\n", i);
       ControllerProperties properties = ctl->getProperties();
-      Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id,
-                    properties.product_id);
+      Serial.printf("Model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id, properties.product_id);
       myControllers[i] = ctl;
-      foundEmptySlot = true;
       break;
     }
   }
-  if (!foundEmptySlot) {
-    Serial.println("CALLBACK: Controller connected, but could not found empty slot");
-  }
 }
 
+// Callback for disconnected controllers
 void onDisconnectedController(ControllerPtr ctl) {
-  bool foundController = false;
-
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (myControllers[i] == ctl) {
       Serial.printf("CALLBACK: Controller disconnected from index=%d\n", i);
       myControllers[i] = nullptr;
-      foundController = true;
       break;
     }
   }
-
-  if (!foundController) {
-    Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
-  }
 }
 
-
+// Move motors with speed and turn
 void moveWithTurn(int speed, int turn, int reverse) {
+  reverse = map(reverse, 0, 1020, 0, -maxSpeed);
+  speed = map(speed, 0, 1020, 0, maxSpeed);
+  turn = map(turn, -509, 509, maxSpeed, -maxSpeed);
 
-  int leftSpeed, rightSpeed;
-  int error = 1;
-  reverse = map(reverse, 0, 1020, 0, -150);
-  speed = map(speed, 0, 1020, 0, 250);     // Map speed to motor range
-  turn = map(turn, -509, 509, 250, -250);  // Map turn to motor range
+  leftSpeed = (reverse == 0) ? speed - turn : reverse + turn;
+  rightSpeed = (reverse == 0) ? speed + turn : reverse - turn;
 
-  if (reverse == 0) {
+  int maxConstraint = (reverse == 0) ? 250 : 150;
+  leftSpeed = constrain(leftSpeed, -maxConstraint, maxConstraint);
+  rightSpeed = constrain(rightSpeed, -maxConstraint, maxConstraint);
 
-    leftSpeed = speed - turn;
-    rightSpeed = speed + turn;
+  frontLeftMotor->setSpeed(abs(leftSpeed));
+  backLeftMotor->setSpeed(abs(leftSpeed));
+  frontRightMotor->setSpeed(abs(rightSpeed));
+  backRightMotor->setSpeed(abs(rightSpeed));
 
-    // Constrain motor speeds to allowable range
-    leftSpeed = constrain(leftSpeed, -250, 250);
-    rightSpeed = constrain(rightSpeed, -250, 250);
+  frontLeftMotor->run(leftSpeed > 0 ? FORWARD : BACKWARD);
+  backLeftMotor->run(leftSpeed > 0 ? FORWARD : BACKWARD);
+  frontRightMotor->run(rightSpeed > 0 ? FORWARD : BACKWARD);
+  backRightMotor->run(rightSpeed > 0 ? FORWARD : BACKWARD);
 
-    // Set motor speeds
-    frontLeftMotor->setSpeed(abs(leftSpeed));
-    backLeftMotor->setSpeed(abs(leftSpeed));
-    frontRightMotor->setSpeed(abs(rightSpeed));
-    backRightMotor->setSpeed(abs(rightSpeed));
-
-    // Set motor directions
-    if (leftSpeed > 0) {
-      frontLeftMotor->run(FORWARD);
-      backLeftMotor->run(FORWARD);
-    } else {
-      frontLeftMotor->run(BACKWARD);
-      backLeftMotor->run(BACKWARD);
-    }
-
-    if (rightSpeed > 0) {
-      frontRightMotor->run(FORWARD);
-      backRightMotor->run(FORWARD);
-    } else {
-      frontRightMotor->run(BACKWARD);
-      backRightMotor->run(BACKWARD);
-    }
-
-  } else {
-
-    leftSpeed = reverse + turn;
-    rightSpeed = reverse - turn;
-
-    // Constrain motor speeds to allowable range
-    leftSpeed = constrain(leftSpeed, -150, 150);
-    rightSpeed = constrain(rightSpeed, -150, 150);
-
-
-    // Set motor speeds
-    frontLeftMotor->setSpeed(abs(leftSpeed) - error);
-    backLeftMotor->setSpeed(abs(leftSpeed) - error);
-    frontRightMotor->setSpeed(abs(rightSpeed));
-    backRightMotor->setSpeed(abs(rightSpeed));
-
-    // Set motor directions
-    if (leftSpeed > 0) {
-      frontLeftMotor->run(FORWARD);
-      backLeftMotor->run(FORWARD);
-    } else {
-      frontLeftMotor->run(BACKWARD);
-      backLeftMotor->run(BACKWARD);
-    }
-
-    if (rightSpeed > 0) {
-      frontRightMotor->run(FORWARD);
-      backRightMotor->run(FORWARD);
-    } else {
-      frontRightMotor->run(BACKWARD);
-      backRightMotor->run(BACKWARD);
-    }
-  }
-
-
-  Serial.print("leftSpeed: ");
-  Serial.print(abs(leftSpeed) - error);
-  Serial.print(" rightSpeed: ");
-  Serial.println(rightSpeed);
+  Serial.printf("LeftSpeed: %d RightSpeed: %d\n", leftSpeed, rightSpeed);
 }
 
-// void dumpGamepad(ControllerPtr ctl) {
-
-
-//   Serial.printf(
-//     "dpad: 0x%02x, buttons: 0x%04x, axis L: %4d, %4d, axis R: %4d, %4d, brake: %4d, throttle: %4d, "
-//     "misc: 0x%02x\n",
-//     ctl->dpad(),        // D-pad
-//     ctl->buttons(),     // bitmask of pressed buttons
-//     ctl->axisX(),       // (-511 - 512) left X Axis
-//     ctl->axisY(),       // (-511 - 512) left Y axis
-//     ctl->axisRX(),      // (-511 - 512) right X axis
-//     ctl->axisRY(),      // (-511 - 512) right Y axis
-//     ctl->brake(),       // (0 - 1023): brake button
-//     ctl->throttle(),    // (0 - 1023): throttle (AKA gas) button
-//     ctl->miscButtons()  // bitmask of pressed "misc" buttons
-//   );
-// }
-
-
+// Process input from a gamepad
 void processGamepad(ControllerPtr ctl) {
-  // There are different ways to query whether a button is pressed.
-  // By query each button individually:
-  //  a(), b(), x(), y(), l1(), etc...
   if (ctl->a()) {
-    static int colorIdx = 0;
-    // Some gamepads like DS4 and DualSense support changing the color LED.
-    // It is possible to change it by calling:
-    Serial.println("a is pressed");
+    Serial.println("A is pressed");
   }
 
   if (ctl->b()) {
-    // Turn on the 4 LED. Each bit represents one LED.
-    Serial.println("b is pressed");
+    Serial.println("B is pressed");
   }
 
   if (ctl->x()) {
-    // Some gamepads like DS3, DS4, DualSense, Switch, Xbox One S, Stadia support rumble.
-    // It is possible to set it by calling:
-    // Some controllers have two motors: "strong motor", "weak motor".
-    // It is possible to control them independently.
-    ctl->playDualRumble(0 /* delayedStartMs */, 250 /* durationMs */, 0x80 /* weakMagnitude */,
-                        0x40 /* strongMagnitude */);
-    Serial.println("x is pressed");
+    ctl->playDualRumble(0, 250, 0x80, 0x40);
+    Serial.println("X is pressed");
   }
+
   if (ctl->y()) {
-
-    Serial.println("y is pressed");
+    speedIndex = (speedIndex + 1) % 3;
+    switch (speedIndex) {
+      case 0:
+        maxSpeed = 80;
+        ctl->playDualRumble(0, 200, 0x80, 0x40);
+        break;
+      case 1:
+        maxSpeed = 160;
+        ctl->playDualRumble(0, 450, 0x80, 0x40);
+        break;
+      case 2:
+        maxSpeed = 250;
+        ctl->playDualRumble(0, 900, 0x80, 0x40);
+        break;
+    }
+    Serial.printf("Speed set to: %d\n", maxSpeed);
   }
-  // move motor
-  moveWithTurn(ctl->throttle(), ctl->axisX(), ctl->brake());
-  // Another way to query controller data is by getting the buttons() function.
-  // See how the different "dump*" functions dump the Controller info.
 
-  //dumpGamepad(ctl);
+  moveWithTurn(ctl->throttle(), ctl->axisX(), ctl->brake());
 }
 
-
+// Process all connected controllers
 void processControllers() {
   for (auto myController : myControllers) {
     if (myController && myController->isConnected() && myController->hasData()) {
       if (myController->isGamepad()) {
         processGamepad(myController);
-      } else {
-        Serial.println("Unsupported controller");
       }
     }
   }
 }
 
-// Arduino setup function. Runs in CPU 1
-void setup() {
-  Serial.begin(115200);
-  Serial.println("Adafruit Motorshield v2 - Differential Drive Car Control");
-
-  AFMS.begin();  // Create with the default frequency 1.6KHz
-  Serial.printf("Firmware: %s\n", BP32.firmwareVersion());
-  const uint8_t *addr = BP32.localBdAddress();
-  Serial.printf("BD Addr: %2X:%2X:%2X:%2X:%2X:%2X\n", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-
-
-
-
-  // Setup the Bluepad32 callbacks
+// Bluetooth task: handles controller updates
+void taskBluetooth(void *pvParameters) {
   BP32.setup(&onConnectedController, &onDisconnectedController);
-
-  // "forgetBluetoothKeys()" should be called when the user performs
-  // a "device factory reset", or similar.
-  // Calling "forgetBluetoothKeys" in setup() just as an example.
-  // Forgetting Bluetooth keys prevents "paired" gamepads to reconnect.
-  // But it might also fix some connection / re-connection issues.
   BP32.forgetBluetoothKeys();
-
-  // Enables mouse / touchpad support for gamepads that support them.
-  // When enabled, controllers like DualSense and DualShock4 generate two connected devices:
-  // - First one: the gamepad
-  // - Second one, which is a "virtual device", is a mouse.
-  // By default, it is disabled.
   BP32.enableVirtualDevice(false);
+
+  while (true) {
+    if (BP32.update()) {
+      xSemaphoreTake(controllerSemaphore, portMAX_DELAY);
+      processControllers();
+      xSemaphoreGive(controllerSemaphore);
+    }
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
 }
 
+// Motor control task: handles motor updates
+void taskMotorControl(void *pvParameters) {
+  AFMS.begin();
 
-// Arduino loop function. Runs in CPU 1.
+  while (true) {
+    // Additional motor control logic can be added here
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+// Setup tasks
+void setup() {
+  Serial.begin(115200);
+  controllerSemaphore = xSemaphoreCreateMutex();
+
+  xTaskCreatePinnedToCore(taskBluetooth, "BluetoothTask", 10000, NULL, 2, NULL, 0); // Core 0
+  xTaskCreatePinnedToCore(taskMotorControl, "MotorControlTask", 10000, NULL, 1, NULL, 1); // Core 1
+}
+
 void loop() {
-  // This call fetches all the controllers' data.
-  // Call this function in your main loop.
-  bool dataUpdated = BP32.update();
-  if (dataUpdated)
-    processControllers();
-
-  // The main loop must have some kind of "yield to lower priority task" event.
-  // Otherwise, the watchdog will get triggered.
-  // If your main loop doesn't have one, just add a simple `vTaskDelay(1)`.
-  // Detailed info here:
-  // https://stackoverflow.com/questions/66278271/task-watchdog-got-triggered-the-tasks-did-not-reset-the-watchdog-in-time
-
-  //     vTaskDelay(1);
-  delay(50);
+  // Empty loop as all logic is in tasks
 }
