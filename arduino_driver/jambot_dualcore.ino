@@ -8,6 +8,7 @@
 #include <Wire.h>
 #include <Adafruit_MotorShield.h>
 #include <rmw/qos_profiles.h>
+#include <sensor_msgs/msg/battery_state.h>
 
 // Motor definitions
 Adafruit_MotorShield AFMS = Adafruit_MotorShield();
@@ -18,7 +19,7 @@ Adafruit_DCMotor *backLeftMotor = AFMS.getMotor(4);
 
 int leftSpeed, rightSpeed;
 int speedIndex = 0;
-int maxSpeed = 160;
+int maxSpeed = 200;
 float angular_z, linear_x;
 
 // ROS 2 variables
@@ -29,18 +30,33 @@ rcl_allocator_t allocator;
 rclc_support_t support;
 rcl_node_t node;
 
+// Battery publisher variables
+rcl_publisher_t battery_publisher;
+sensor_msgs__msg__BatteryState battery_msg;
+
+#define LED_PIN 2
+#define BATTERY_ADC_PIN 34
+#define R1 9.9
+#define R2 5.06
+#define REFERENCE_VOLTAGE 3.3
+#define ADC_MAX_VALUE 4095
+
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 
-#define LED_PIN 2
+// Task handle for core 0
+TaskHandle_t TaskCore0;
+TaskHandle_t TaskCore1;
 
 void error_loop() {
   pinMode(LED_PIN, OUTPUT);
   while (1) {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+
     delay(100);
   }
 }
+
 void moveWithTurn(int speed, int turn, int reverse) {
   if (reverse == 0 && speed == 0) {
     // Handle stationary turning
@@ -68,7 +84,6 @@ void moveWithTurn(int speed, int turn, int reverse) {
   Serial.printf("LeftSpeed: %d RightSpeed: %d\n", leftSpeed, rightSpeed);
 }
 
-// Callback function for the subscription
 void subscription_callback(const void *msgin) {
   const geometry_msgs__msg__Twist *msg = (const geometry_msgs__msg__Twist *)msgin;
 
@@ -76,21 +91,58 @@ void subscription_callback(const void *msgin) {
   linear_x = msg->linear.x;
   angular_z = msg->angular.z;
 
-  // Print the received values to the Serial Monitor
-//  Serial.printf("linear_x: %f angular_z: %f\n", linear_x, angular_z);
-
   // Map linear_x and angular_z to motor speeds
   int speed = map(linear_x*100, 0, 200, 0, maxSpeed);
   int reverse = map(linear_x*100, 0, -200, 0, -maxSpeed);
   int turn = map(angular_z*1000, -1000, 1000, maxSpeed, -maxSpeed);
 
-
-   //Serial.printf("speed: %d reverse: %d turn: %d\n", speed, reverse,turn);
   moveWithTurn(speed, turn, reverse);
 }
 
+void publish_battery_status() {
+  // Read ADC value and calculate battery voltage
+  int adc_value = analogRead(BATTERY_ADC_PIN);
+  float voltageOut = adc_value * (REFERENCE_VOLTAGE / ADC_MAX_VALUE);
+  float batteryVoltage = voltageOut * (R1 + R2) / R2;
+  float batteryPercentage = constrain((batteryVoltage - 6.0) / (8.4 - 6.0) * 100, 0.0, 100);
+
+  // Update the BatteryState message
+  battery_msg.header.stamp.sec = millis() / 1000;
+  battery_msg.header.stamp.nanosec = (millis() % 1000) * 1000000;
+  battery_msg.voltage = batteryVoltage;
+  battery_msg.percentage = batteryPercentage;
+
+  // Publish the battery status
+  RCSOFTCHECK(rcl_publish(&battery_publisher, &battery_msg, NULL));
+   // vTaskDelay(1000 / portTICK_PERIOD_MS); // 1 second delay
+}
+
+// Function to blink LED on Core 0
+void bateryPub(void *parameter) {
+
+  while (true) {
+    publish_battery_status();
+ Serial.print("Free heap memory: ");
+    Serial.println(ESP.getFreeHeap());
+    //chekc using space 
+    // Serial.print("BatteryPub Stack High Water Mark: ");
+    // Serial.println(uxTaskGetStackHighWaterMark(NULL));
+    vTaskDelay(1000 / portTICK_PERIOD_MS);  // Delay for 1 second
+  }
+}
+
+// Function to print message on Core 1
+void motor(void *parameter) {
+  while (true) {
+    // Process any pending ROS callbacks
+  RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(8))); 
+
+      vTaskDelay(4/ portTICK_PERIOD_MS);  // Delay for 10ms
+}
+}
+
 void setup() {
-  Serial.begin(115200);
+ Serial.begin(115200);
 
   // Initialize the micro-ROS transport for Wi-Fi
   set_microros_wifi_transports("BELL777", "Sohul_0302", "192.168.4.23", 8888);
@@ -112,14 +164,25 @@ void setup() {
     "cmd_vel2",
     &rmw_qos_profile_sensor_data));  // Volatile QoS
 
+  // Create a publisher for BatteryState message
+  RCCHECK(rclc_publisher_init_best_effort(
+    &battery_publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, BatteryState),
+    "battery_status"));
+
   // Create an executor
   RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA));
 
   // Initialize the motor shield
   AFMS.begin();
+  
+  // Create tasks to run on Core 0 and Core 1
+  xTaskCreatePinnedToCore(bateryPub, "bateryPub ", 6500, NULL, 1, &TaskCore0, 0);  // Core 0
+  xTaskCreatePinnedToCore(motor, "Motor control", 7000, NULL, 2, &TaskCore1, 1);  // Core 1
 }
 
 void loop() {
-  RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(8))); // Reduced delay for maximum processing speed
+  // Nothing to do in loop since tasks are running on different cores
 }
